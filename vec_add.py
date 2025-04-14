@@ -1,6 +1,7 @@
 import torch
 import triton
 import triton.language as tl
+import sys
 
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 BLOCK_SIZE = 256
@@ -36,7 +37,7 @@ def add(x, y):
     n_elements = output.numel()
     grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']),1)
     # grid = (int((n_elements + BLOCK_SIZE - 1) / BLOCK_SIZE), 1)
-    print(f"grid: {grid}")
+    # print(f"grid: {grid}")
     
     add_kernel[grid](
         x, y, output, n_elements, BLOCK_SIZE=BLOCK_SIZE
@@ -55,7 +56,37 @@ def test_add_kernel(size, abstol=1e-3, reltol=1e-3, device=DEVICE):
     torch.testing.assert_close(z_tri, z_ref, atol=abstol, rtol=reltol)
     print("passed") 
     
+@triton.testing.perf_report(
+    triton.testing.Benchmark(
+        x_names=['size'], #vector sizes
+        x_vals=[2**i for i in range(9, 14, 1)],
+        x_log=True,
+        line_arg='provider',
+        line_vals=['triton', 'torch'],
+        line_names=['Triton', 'Torch'],
+        styles=[('blue', '-'), ('green', '--')],
+        ylabel='GFLOPS/s',
+        plot_name='vec_add_performance',
+        args={}
+    )
+)
+def benchmark(size, provider):
+    x = torch.randn(size, device=DEVICE, dtype=torch.float32)
+    y = torch.randn(size, device=DEVICE, dtype=torch.float32)
+    
+    quantiles = [0.5, 0.05, 0.95]
+    if provider == 'torch':
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: x+y, quantiles=quantiles)
+    if provider == 'triton':
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: add(x,y), quantiles=quantiles)
+
+    gflops_ps = lambda ms: 3 * x.numel() * x.element_size() * 1e-9 / (ms * 1e-3)
+    
+    return gflops_ps(ms), gflops_ps(max_ms), gflops_ps(min_ms)
+    
 if __name__ == '__main__':
 
     test_add_kernel(size=1030)
     test_add_kernel(size=1024)
+    if len(sys.argv) > 1 and sys.argv[1] == '--benchmark':
+        benchmark.run(save_path='.', print_data=True)
